@@ -1,0 +1,7 @@
+Flask
+Flask-CORS
+supabase
+python-dotenv
+PyJWT
+numpy
+essentia
