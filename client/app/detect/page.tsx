@@ -38,6 +38,7 @@ interface QueueItem {
 }
 
 export default function HomePage() {
+    const endpointUrl = 'https://shiny-space-fortnight-7p4j9qr75x7h4j-5000.app.github.dev';
     const [user, setUser] = useState<User | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [isDragging, setIsDragging] = useState(false);
@@ -92,7 +93,7 @@ export default function HomePage() {
 
         if (session) {
             try {
-                const response = await fetch('https://effective-sniffle-qpg5qr9vxx7f6wrr-5000.app.github.dev/api/history', {
+                const response = await fetch(`${endpointUrl}/api/history`, {
                     headers: {
                         'Authorization': `Bearer ${session.access_token}`
                     }
@@ -144,7 +145,7 @@ export default function HomePage() {
 
                 updateQueueItem(nextItem.id, { progress: 30 });
 
-                const res = await fetch('https://effective-sniffle-qpg5qr9vxx7f6wrr-5000.app.github.dev/api/process', {
+                const res = await fetch(`${endpointUrl}/api/process`, {
                     method: 'POST',
                     headers: {
                         'Authorization': `Bearer ${session.access_token}`
@@ -275,7 +276,7 @@ export default function HomePage() {
         if (!session) return;
 
         try {
-            const response = await fetch(`https://effective-sniffle-qpg5qr9vxx7f6wrr-5000.app.github.dev/api/delete/${processingId}`, {
+            const response = await fetch(`${endpointUrl}/api/delete/${processingId}`, {
                 method: 'DELETE',
                 headers: {
                     'Authorization': `Bearer ${session.access_token}`
@@ -640,27 +641,6 @@ export default function HomePage() {
                                     </div>
                                 </div>
                             )}
-
-                            <button
-                                onClick={() => {
-                                    if (queue.length === 0) {
-                                        setError('Please upload at least one audio file first');
-                                    }
-                                }}
-                                disabled={queue.length === 0 || isProcessing}
-                                className="w-full mt-4 bg-red-600 hover:bg-red-700 disabled:bg-neutral-800 disabled:text-neutral-600 text-white text-sm py-2.5 px-4 rounded transition-colors font-medium flex items-center justify-center gap-2"
-                            >
-                                {isProcessing ? (
-                                    <>
-                                        <FaSpinner className="animate-spin" />
-                                        Processing...
-                                    </>
-                                ) : (
-                                    <>
-                                        Process {queue.length > 0 ? `${queue.length} file${queue.length > 1 ? 's' : ''}` : 'Audio'}
-                                    </>
-                                )}
-                            </button>
                         </div>
                     </div>
 

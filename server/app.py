@@ -28,7 +28,7 @@ app = Flask(__name__)
 
 # CORS Configuration
 CORS(app, 
-     origins=["https://effective-sniffle-qpg5qr9vxx7f6wrr-3000.app.github.dev", "http://localhost:3000", "http://localhost:3001"],
+     origins=["https://shiny-space-fortnight-7p4j9qr75x7h4j-3000.app.github.dev", "http://localhost:3000", "http://localhost:3001"],
      methods=["GET", "POST", "OPTIONS", "DELETE"],
      allow_headers=["Authorization", "Content-Type"],
      supports_credentials=True)
