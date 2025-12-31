@@ -322,38 +322,37 @@ export default function HomePage() {
 
     return (
         <div className="min-h-screen bg-neutral-950 text-neutral-100">
-            <header className="flex items-center justify-between w-full sticky px-6 py-4 border-b border-neutral-800">
+            <header className="flex items-center justify-between w-full sticky px-12 py-4 border-b border-neutral-800">
                 <div className="flex items-center gap-2">
                     <h1 className="text-sm font-semibold flex items-center gap-1.5 tracking-wide mr-4">
                         <TbActivityHeartbeat className="text-xl text-red-500" />
                         BEATMARKER
                     </h1>
-                    <a href="#">
+                    <a className="md:block hidden" href="#">
                         <button className="cursor-pointer px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm rounded-md transition-colors flex gap-2 items-center"><FaProductHunt/> Vote on ProductHunt</button>
                     </a>
-                    <a href="#">
+                    <a className="md:block hidden" href="https://buymeacoffee.com/emjjkk" target="_blank" rel="noopener noreferrer">
                         <button className="cursor-pointer px-4 py-2 bg-yellow-500 hover:bg-yellow-600 text-white text-sm rounded-md transition-colors flex gap-2 items-center"><SiBuymeacoffee /> Buy me a coffee</button>
                     </a>
                 </div>
                 <div className="flex items-center gap-3">
                     <div className="flex items-center gap-3">
                         <div className="flex flex-col items-end">
-                            <span className="text-xs text-neutral-300">{user?.email}</span>
+                            <span className="md:block hidden text-xs text-neutral-300">{user?.email}</span>
                             <span className="text-xs text-neutral-500">{user?.user_metadata?.full_name}</span>
                         </div>
                         <FaCircleUser className="text-2xl text-neutral-400" />
                     </div>
                 </div>
             </header>
-
-            <main className="w-full min-h-screen mx-auto px-6 py-4">
+            <main className="max-w-8xl mx-auto px-12 py-4">
                 {error && (
                     <div className="mb-4 bg-red-900/20 border border-red-800 rounded-lg p-3 text-sm text-red-400">
                         {error}
                     </div>
                 )}
 
-                <div className="grid grid-cols-2 gap-8">
+                <div className="md:grid grid-cols-2 gap-8">
                     {/* Left Column - Upload & Options */}
                     <div className="space-y-6">
                         <div>
@@ -362,7 +361,7 @@ export default function HomePage() {
                                 onDrop={handleDrop}
                                 onDragOver={handleDragOver}
                                 onDragLeave={handleDragLeave}
-                                className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors ${isDragging
+                                className={`border-2 border-dashed rounded-lg py-15 text-center transition-colors ${isDragging
                                     ? 'border-red-500 bg-red-500/5'
                                     : 'border-neutral-700 hover:border-neutral-600'
                                     }`}
@@ -434,7 +433,7 @@ export default function HomePage() {
                                 </h2>
                                 <div className="flex items-center gap-2">
                                     {!optionsExpanded && (
-                                        <span className="text-xs text-neutral-500">
+                                        <span className="hidden md:block text-xs text-neutral-500">
                                             FPS: {fps} · Sensitivity: {sensitivity} · Loudness: {loudness} · Gap: {minGap}s{beatsOnly ? ' · Beats only' : ''}
                                         </span>
                                     )}
@@ -560,9 +559,9 @@ export default function HomePage() {
                                 <h2 className="text-sm font-medium text-neutral-300 group-hover:text-neutral-200 transition-colors">
                                     Output Options
                                 </h2>
-                                <div className="flex items-center gap-2">
+                                <div className="flex items-center gap-2 mb-3">
                                     {!outputExpanded && (
-                                        <span className="text-xs text-neutral-500">
+                                        <span className="hidden md:block text-xs text-neutral-500">
                                             Color: {markerColor} · Name: {markerName}{includeTimestamps ? ' · With timestamps' : ''}
                                         </span>
                                     )}
@@ -575,7 +574,7 @@ export default function HomePage() {
                             </div>
 
                             {outputExpanded && (
-                                <div className="space-y-4 bg-neutral-900 rounded-lg p-4 border border-neutral-800">
+                                <div className="mb-5 space-y-4 bg-neutral-900 rounded-lg p-4 border border-neutral-800">
                                     <div>
                                         <label className="text-xs text-neutral-400 block mb-1.5 flex items-center gap-1.5">
                                             Marker color
@@ -646,10 +645,10 @@ export default function HomePage() {
 
                     {/* Right Column - Results & History */}
                     <div>
-                        <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center justify-between mt-6 md:mt-0 mb-3">
                             <h2 className="text-sm font-medium text-neutral-300">Results & History</h2>
                             <div className="text-xs text-neutral-500">
-                                {attemptsLeft} attempts left · Resets in {resetTime}
+                                Files are deleted every June 1st and Dec 1st to manage storage.
                             </div>
                         </div>
 
@@ -701,80 +700,16 @@ export default function HomePage() {
                             ))}
 
                             {results.length === 0 && queue.length === 0 && (
-                                <div className="text-center flex items-center justify-center flex-col py-12 text-neutral-600">
+                                <div className="text-center flex items-center justify-center flex-col py-15 bg-neutral-900 rounded text-neutral-600">
                                     <FaCat className="text-3xl w-fit mb-2" />
                                     <p className="text-sm">No results yet</p>
-                                    <p className="text-xs mt-1">Upload and process an audio file to get started</p>
+                                    <p className="text-xs mt-1">When you upload an audio file, the results will appear here.</p>
                                 </div>
                             )}
                         </div>
                     </div>
                 </div>
             </main>
-
-            {/* Access Modal */}
-            {showAccessModal && (
-                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-                    <div className="bg-neutral-900 border border-neutral-800 rounded-lg max-w-md w-full max-h-[90vh] overflow-y-auto">
-                        <div className="sticky top-0 bg-neutral-900 border-b border-neutral-800 p-4 flex items-center justify-between">
-                            <h2 className="text-lg font-semibold flex items-center gap-2">
-                                <FaCrown className="text-yellow-500" />
-                                Get Full Access
-                            </h2>
-                            <button
-                                onClick={() => setShowAccessModal(false)}
-                                className="text-neutral-400 hover:text-neutral-200 transition-colors"
-                            >
-                                <FaXmark className="text-xl" />
-                            </button>
-                        </div>
-
-                        <div className="p-6">
-                            <div className="mb-6">
-                                <div className="bg-gradient-to-br from-yellow-900/20 to-neutral-950 border border-yellow-600/30 rounded-lg p-5">
-                                    <h3 className="text-base font-semibold mb-1 text-yellow-500 flex items-center gap-2">
-                                        <FaCrown className="text-sm" />
-                                        Full Access
-                                    </h3>
-                                    <p className="text-xs text-yellow-600/80 mb-4">Premium features unlocked</p>
-
-                                    <ul className="space-y-3 text-sm">
-                                        <li className="flex items-start gap-2">
-                                            <FaCheck className="text-green-500 mt-0.5 flex-shrink-0" />
-                                            <span className="text-neutral-200">Unlimited attempts</span>
-                                        </li>
-                                        <li className="flex items-start gap-2">
-                                            <FaCheck className="text-green-500 mt-0.5 flex-shrink-0" />
-                                            <span className="text-neutral-200">No auto-delete — keep files forever</span>
-                                        </li>
-                                        <li className="flex items-start gap-2">
-                                            <FaCheck className="text-green-500 mt-0.5 flex-shrink-0" />
-                                            <span className="text-neutral-200">Advanced processing options</span>
-                                        </li>
-                                        <li className="flex items-start gap-2">
-                                            <FaCheck className="text-green-500 mt-0.5 flex-shrink-0" />
-                                            <span className="text-neutral-200">Files up to 50MB</span>
-                                        </li>
-                                        <li className="flex items-start gap-2">
-                                            <FaCheck className="text-green-500 mt-0.5 flex-shrink-0" />
-                                            <span className="text-neutral-200">Batch processing support</span>
-                                        </li>
-                                    </ul>
-                                </div>
-                            </div>
-
-                            <div className="flex gap-3">
-                                <button className="flex-1 bg-yellow-600 hover:bg-yellow-700 text-white font-medium py-3 px-4 rounded-lg transition-colors text-sm">
-                                    Get access key
-                                </button>
-                                <button className="flex-1 bg-neutral-800 hover:bg-neutral-750 text-neutral-300 font-medium py-3 px-4 rounded-lg transition-colors text-sm">
-                                    Activate access key
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
         </div>
     );
 }

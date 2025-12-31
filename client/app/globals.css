@@ -19,6 +19,20 @@
   }
 }
 
+*{
+  /* For Chrome, Safari, and Opera */
+  &::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* For Internet Explorer and Edge */
+  -ms-overflow-style: none;
+
+  /* For Firefox */
+  scrollbar-width: none;
+}
+
+
 body {
   background: var(--background);
   color: var(--foreground);

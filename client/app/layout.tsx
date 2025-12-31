@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono, IBM_Plex_Sans } from "next/font/google";
 import "./globals.css";
 import { Suspense } from "react";
+import Script from "next/script";
 
 const geistSans = IBM_Plex_Sans({
   variable: "--font-geist-sans",
@@ -41,6 +42,11 @@ export default function RootLayout({
       >
         <Suspense>{children}</Suspense>
       </body>
+      <Script
+        src="https://cloud.umami.is/script.js"
+        data-website-id="0fbd5448-d2ee-4e59-88bf-8cc77ebfa8bb"
+        strategy="afterInteractive"
+      />
     </html>
   );
 }
