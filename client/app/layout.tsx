@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono, IBM_Plex_Sans } from "next/font/google";
 import "./globals.css";
+import { Suspense } from "react";
 
 const geistSans = IBM_Plex_Sans({
   variable: "--font-geist-sans",
@@ -38,7 +39,7 @@ export default function RootLayout({
       <body
         className={`relative ${geistSans.className} ${geistMono.variable} antialiased`}
       >
-        {children}
+        <Suspense>{children}</Suspense>
       </body>
     </html>
   );
