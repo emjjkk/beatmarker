@@ -31,7 +31,7 @@ CORS(
     app,
     resources={r"/*": {
         "origins": [
-            "https://shiny-space-fortnight-7p4j9qr75x7h4j-3000.app.github.dev/",
+            "https://shiny-space-fortnight-7p4j9qr75x7h4j-3000.app.github.dev",
             "https://beatmarker.emjjkk.tech"
         ]
     }},
