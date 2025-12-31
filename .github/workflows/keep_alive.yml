@@ -2,7 +2,7 @@ name: Keep Render Alive
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # every 5 minutes
+    - cron: '*/2 * * * *'  # every 2 minutes
   workflow_dispatch:  # allows manual trigger too
 
 jobs:
@@ -11,4 +11,4 @@ jobs:
     steps:
       - name: Ping Render app
         run: |
-          curl -s https://YOUR-RENDER-APP.onrender.com/keep-alive
+          curl -s https://beatmarker.onrender.com/keep-alive
