@@ -31,8 +31,8 @@ CORS(
     app,
     resources={r"/*": {
         "origins": [
-            "beatmarker.emjjkk.tech",
-            "shiny-space-fortnight-7p4j9qr75x7h4j-3000.app.github.dev"
+            "https://beatmarker.emjjkk.tech",
+            "https://shiny-space-fortnight-7p4j9qr75x7h4j-3000.app.github.dev"
         ],
         "supports_credentials": True,
         "allow_headers": ["Content-Type", "Authorization"],
