@@ -488,5 +488,9 @@ def delete_processing(user_id, processing_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route("/keep-alive", methods=["GET"])
+def keep_alive():
+    return jsonify({"status": "alive"}), 200
+
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
