@@ -36,7 +36,7 @@ CORS(
         ],
         "supports_credentials": True,
         "allow_headers": ["Content-Type", "Authorization"],
-        "methods": ["GET", "POST", "OPTIONS"]
+        "methods": ["GET", "POST", "OPTIONS", "DELETE"]
     }}
 )
 
