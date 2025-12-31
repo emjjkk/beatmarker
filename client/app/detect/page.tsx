@@ -5,7 +5,6 @@ import { User } from '@supabase/supabase-js';
 import { TbActivityHeartbeat } from "react-icons/tb";
 import { FaHelicopter, FaCircleUser, FaUpload, FaSpinner, FaDownload, FaCircleInfo, FaChevronDown, FaChevronUp, FaCat, FaCheck, FaXmark, FaProductHunt, FaClock, FaTrash } from "react-icons/fa6";
 import { SiBuymeacoffee } from "react-icons/si";
-import { checkProStatus } from "@/utils/checkProStatus"
 import InfoModal from '@/components/info';
 
 interface ProcessingResult {
@@ -63,14 +62,6 @@ export default function HomePage() {
     const [showAccessModal, setShowAccessModal] = useState(false);
     const [isPro, setIsPro] = useState(false);
     const supabase = createClient();
-
-    useEffect(() => {
-        const checkPro = async () => {
-            const isPro = await checkProStatus(supabase);
-            setIsPro(isPro);
-        };
-        checkPro();
-    }, []);
 
     useEffect(() => {
         const fetchUser = async () => {
