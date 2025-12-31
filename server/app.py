@@ -29,10 +29,17 @@ app = Flask(__name__)
 # CORS Configuration
 CORS(
     app,
-    resources={r"/*": {"origins": "*"}},
-    methods=["GET", "POST", "OPTIONS", "DELETE"],
-    allow_headers=["Authorization", "Content-Type"]
+    resources={r"/*": {
+        "origins": [
+            "https://shiny-space-fortnight-7p4j9qr75x7h4j-3000.app.github.dev/",
+            "https://beatmarker.emjjkk.tech"
+        ]
+    }},
+    supports_credentials=True,
+    allow_headers=["Authorization", "Content-Type"],
+    methods=["GET", "POST", "OPTIONS", "DELETE"]
 )
+
 
 # Configuration
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
