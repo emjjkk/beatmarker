@@ -3,9 +3,10 @@ import { useState, useEffect } from "react";
 import { createClient } from '@/utils/supabase/client';
 import { User } from '@supabase/supabase-js';
 import { TbActivityHeartbeat } from "react-icons/tb";
-import { FaCrown, FaCircleUser, FaUpload, FaSpinner, FaDownload, FaCircleInfo, FaChevronDown, FaChevronUp, FaCat, FaCheck, FaXmark, FaProductHunt, FaClock, FaTrash } from "react-icons/fa6";
+import { FaHelicopter, FaCircleUser, FaUpload, FaSpinner, FaDownload, FaCircleInfo, FaChevronDown, FaChevronUp, FaCat, FaCheck, FaXmark, FaProductHunt, FaClock, FaTrash } from "react-icons/fa6";
 import { SiBuymeacoffee } from "react-icons/si";
 import { checkProStatus } from "@/utils/checkProStatus"
+import InfoModal from '@/components/info';
 
 interface ProcessingResult {
     id: string;
@@ -40,6 +41,7 @@ interface QueueItem {
 export default function HomePage() {
     const endpointUrl = 'https://beatmarker.onrender.com';
     const [user, setUser] = useState<User | null>(null);
+    const [isModalOpen, setIsModalOpen] = useState(false);
     const [isLoading, setIsLoading] = useState(true);
     const [isDragging, setIsDragging] = useState(false);
     const [queue, setQueue] = useState<QueueItem[]>([]);
@@ -76,11 +78,15 @@ export default function HomePage() {
                 const { data: { user }, error } = await supabase.auth.getUser();
                 if (error) {
                     console.error('Error fetching user:', error);
+                    window.location.href = '/';
+                } else if (!user) {
+                    window.location.href = '/';
                 } else {
                     setUser(user);
                 }
             } catch (error) {
                 console.error('Unexpected error:', error);
+                window.location.href = '/';
             } finally {
                 setIsLoading(false);
             }
@@ -161,13 +167,13 @@ export default function HomePage() {
                 }
 
                 const result = await res.json();
-                
-                updateQueueItem(nextItem.id, { 
-                    status: 'completed', 
+
+                updateQueueItem(nextItem.id, {
+                    status: 'completed',
                     progress: 100,
-                    result 
+                    result
                 });
-                
+
                 setResults(prev => [result, ...prev]);
                 setAttemptsLeft(prev => Math.max(0, prev - 1));
 
@@ -178,8 +184,8 @@ export default function HomePage() {
 
             } catch (err) {
                 console.error('Error processing audio:', err);
-                updateQueueItem(nextItem.id, { 
-                    status: 'failed', 
+                updateQueueItem(nextItem.id, {
+                    status: 'failed',
                     progress: 0,
                     error: err instanceof Error ? err.message : 'Processing failed'
                 });
@@ -192,7 +198,7 @@ export default function HomePage() {
     }, [queue, isProcessing]);
 
     const updateQueueItem = (id: string, updates: Partial<QueueItem>) => {
-        setQueue(prev => prev.map(item => 
+        setQueue(prev => prev.map(item =>
             item.id === id ? { ...item, ...updates } : item
         ));
     };
@@ -202,7 +208,7 @@ export default function HomePage() {
         setIsDragging(false);
         const droppedFiles = Array.from(e.dataTransfer.files);
         const audioFiles = droppedFiles.filter(f => f.type.startsWith('audio/'));
-        
+
         if (audioFiles.length === 0) {
             setError('Please upload audio files');
             return;
@@ -322,14 +328,14 @@ export default function HomePage() {
 
     return (
         <div className="min-h-screen bg-neutral-950 text-neutral-100">
-            <header className="flex items-center justify-between w-full sticky px-12 py-4 border-b border-neutral-800">
+            <header className="flex items-center justify-between w-full sticky px-5 md:px-12 py-4 border-b border-neutral-800">
                 <div className="flex items-center gap-2">
                     <h1 className="text-sm font-semibold flex items-center gap-1.5 tracking-wide mr-4">
                         <TbActivityHeartbeat className="text-xl text-red-500" />
                         BEATMARKER
                     </h1>
                     <a className="md:block hidden" href="#">
-                        <button className="cursor-pointer px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm rounded-md transition-colors flex gap-2 items-center"><FaProductHunt/> Vote on ProductHunt</button>
+                        <button className="cursor-pointer px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm rounded-md transition-colors flex gap-2 items-center"><FaProductHunt /> Vote on ProductHunt</button>
                     </a>
                     <a className="md:block hidden" href="https://buymeacoffee.com/emjjkk" target="_blank" rel="noopener noreferrer">
                         <button className="cursor-pointer px-4 py-2 bg-yellow-500 hover:bg-yellow-600 text-white text-sm rounded-md transition-colors flex gap-2 items-center"><SiBuymeacoffee /> Buy me a coffee</button>
@@ -345,7 +351,7 @@ export default function HomePage() {
                     </div>
                 </div>
             </header>
-            <main className="max-w-8xl mx-auto px-12 py-4">
+            <main className="max-w-8xl mx-auto px-5 md:px-12 py-4">
                 {error && (
                     <div className="mb-4 bg-red-900/20 border border-red-800 rounded-lg p-3 text-sm text-red-400">
                         {error}
@@ -407,7 +413,7 @@ export default function HomePage() {
                                             </div>
                                             {item.status === 'processing' && (
                                                 <div className="w-full bg-neutral-800 rounded-full h-1.5">
-                                                    <div 
+                                                    <div
                                                         className="bg-blue-500 h-1.5 rounded-full transition-all duration-300"
                                                         style={{ width: `${item.progress}%` }}
                                                     />
@@ -710,6 +716,8 @@ export default function HomePage() {
                     </div>
                 </div>
             </main>
+            <div className="absolute bottom-5 right-5 px-4 py-2 text-white bg-neutral-800 flex items-center gap-2 rounded text-sm" onClick={() => setIsModalOpen(true)}><FaHelicopter /> Help & Info</div>
+            <InfoModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} />
         </div>
     );
 }
