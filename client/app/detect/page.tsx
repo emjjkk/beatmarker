@@ -38,7 +38,7 @@ interface QueueItem {
 }
 
 export default function HomePage() {
-    const endpointUrl = 'https://shiny-space-fortnight-7p4j9qr75x7h4j-5000.app.github.dev';
+    const endpointUrl = 'https://beatmarker.onrender.com';
     const [user, setUser] = useState<User | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [isDragging, setIsDragging] = useState(false);
