@@ -1,4 +1,6 @@
-# Beatmarker - Web application to automatically detect beats and drops from an audio file and export them to .edl marker files for Davinci Resolve, Adobe Premiere Pro, etc.
+# Beatmarker
+
+BeatMarker is an experimental web-based audio analysis tool that detects beats, drops, and musical onsets from audio files and exports them as timeline markers compatible with professional video editing software like DaVinci Resolve and Adobe Premiere Pro. Built for editors, musicians, and content creators who want faster, cleaner rhythm-based editing workflows.
 
 Web: https://beatmarker.emjjkk.tech
 
