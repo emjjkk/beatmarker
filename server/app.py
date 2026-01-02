@@ -21,8 +21,8 @@ from essentia.standard import (
     Loudness
 )
 import threading
-from queue import Queue, Empty
 import time
+import fcntl
 
 load_dotenv()
 
@@ -67,9 +67,25 @@ MARKER_COLORS = {
     'orange': '008'
 }
 
-# ------------------ Task Queue System ------------------
-task_queue = Queue()
-processing_lock = threading.Lock()
+# File-based lock for processing
+LOCK_FILE = os.path.join(tempfile.gettempdir(), 'beatmarker_processing.lock')
+
+def get_processing_lock(timeout=0.1):
+    """Try to acquire processing lock with timeout"""
+    try:
+        lock_fd = os.open(LOCK_FILE, os.O_CREAT | os.O_RDWR)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return lock_fd
+    except (IOError, OSError):
+        return None
+
+def release_processing_lock(lock_fd):
+    """Release processing lock"""
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+    except:
+        pass
 
 def update_task_status_db(task_id, status=None, progress=None, result=None, error=None):
     """Update task status in database"""
@@ -100,13 +116,15 @@ def get_task_status_db(task_id):
         print(f"Error getting task status: {e}")
         return None
 
-def create_task_db(task_id, user_id, file_name):
+def create_task_db(task_id, user_id, file_name, temp_path, settings):
     """Create a new task in database"""
     try:
         supabase.table('processing_tasks').insert({
             'task_id': task_id,
             'user_id': user_id,
             'file_name': file_name,
+            'temp_path': temp_path,
+            'settings': settings,
             'status': 'queued',
             'progress': 0,
             'created_at': datetime.utcnow().isoformat() + 'Z',
@@ -115,21 +133,55 @@ def create_task_db(task_id, user_id, file_name):
     except Exception as e:
         print(f"Error creating task: {e}")
 
+def get_next_pending_task():
+    """Get the next pending task from database"""
+    try:
+        response = supabase.table('processing_tasks')\
+            .select('*')\
+            .eq('status', 'queued')\
+            .order('created_at')\
+            .limit(1)\
+            .execute()
+        
+        if response.data and len(response.data) > 0:
+            return response.data[0]
+        return None
+    except Exception as e:
+        print(f"Error getting next task: {e}")
+        return None
+
 def cleanup_old_tasks():
     """Remove tasks older than 2 hours from database"""
     try:
         cutoff_time = (datetime.utcnow() - timedelta(hours=2)).isoformat() + 'Z'
+        
+        # Get old tasks to clean up their temp files
+        old_tasks = supabase.table('processing_tasks')\
+            .select('temp_path')\
+            .lt('updated_at', cutoff_time)\
+            .execute()
+        
+        # Delete temp files
+        for task in old_tasks.data:
+            temp_path = task.get('temp_path')
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+        
+        # Delete from database
         supabase.table('processing_tasks').delete().lt('updated_at', cutoff_time).execute()
     except Exception as e:
         print(f"Error cleaning up tasks: {e}")
 
-def process_audio_task(task_data):
-    """Process audio file - runs in background thread"""
-    task_id = task_data['task_id']
-    temp_path = task_data['temp_path']
-    user_id = task_data['user_id']
-    file_name = task_data['file_name']
-    settings = task_data['settings']
+def process_audio_task(task):
+    """Process audio file"""
+    task_id = task['task_id']
+    temp_path = task['temp_path']
+    user_id = task['user_id']
+    file_name = task['file_name']
+    settings = task['settings']
     
     try:
         update_task_status_db(task_id, status='processing', progress=10)
@@ -257,8 +309,10 @@ def process_audio_task(task_data):
         }
 
         update_task_status_db(task_id, status='completed', progress=100, result=result)
+        print(f"Task {task_id} completed successfully")
 
     except Exception as e:
+        print(f"Error processing task {task_id}: {e}")
         update_task_status_db(task_id, status='failed', progress=0, error=str(e))
     
     finally:
@@ -269,35 +323,49 @@ def process_audio_task(task_data):
             except:
                 pass
 
-def task_worker():
-    """Background worker thread that processes tasks from the queue"""
+def background_worker():
+    """Background worker that processes pending tasks"""
+    print("Background worker started")
     cleanup_counter = 0
     
     while True:
         try:
-            task_data = task_queue.get(timeout=5)
-            if task_data is None:  # Shutdown signal
-                break
+            # Try to acquire lock
+            lock_fd = get_processing_lock()
             
-            # Acquire lock to ensure only one task processes at a time
-            with processing_lock:
-                process_audio_task(task_data)
-            
-            task_queue.task_done()
-            
-        except Empty:
-            # Clean up old tasks periodically (every 50 iterations = ~4 minutes)
-            cleanup_counter += 1
-            if cleanup_counter >= 50:
-                cleanup_old_tasks()
-                cleanup_counter = 0
-            continue
+            if lock_fd is not None:
+                try:
+                    # Get next pending task
+                    task = get_next_pending_task()
+                    
+                    if task:
+                        print(f"Processing task: {task['task_id']}")
+                        process_audio_task(task)
+                    else:
+                        # No tasks, sleep for a bit
+                        time.sleep(2)
+                        
+                        # Cleanup periodically
+                        cleanup_counter += 1
+                        if cleanup_counter >= 50:
+                            cleanup_old_tasks()
+                            cleanup_counter = 0
+                finally:
+                    release_processing_lock(lock_fd)
+            else:
+                # Another worker is processing, wait
+                time.sleep(2)
+                
         except Exception as e:
             print(f"Worker error: {e}")
+            import traceback
+            traceback.print_exc()
+            time.sleep(5)
 
 # Start background worker thread
-worker_thread = threading.Thread(target=task_worker, daemon=True)
+worker_thread = threading.Thread(target=background_worker, daemon=True)
 worker_thread.start()
+print(f"Worker thread started: {worker_thread.is_alive()}")
 
 # ------------------ Authentication Middleware ------------------
 def get_user_id_from_token():
@@ -483,11 +551,14 @@ def calculate_statistics(times):
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
-    return jsonify({'status': 'healthy'}), 200
+    return jsonify({
+        'status': 'healthy',
+        'worker_alive': worker_thread.is_alive()
+    }), 200
 
 @app.route('/api/process', methods=['POST'])
 @require_auth
-def process_audio(user_id):
+def process_audio_route(user_id):
     """Queue audio file for processing"""
     if 'file' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
@@ -529,19 +600,10 @@ def process_audio(user_id):
         # Create task
         task_id = str(uuid.uuid4())
         
-        # Create task in database
-        create_task_db(task_id, user_id, file.filename)
+        print(f"Creating task {task_id} for file: {file.filename}")
         
-        task_data = {
-            'task_id': task_id,
-            'temp_path': temp_path,
-            'user_id': user_id,
-            'file_name': file.filename,
-            'settings': settings
-        }
-
-        # Add to queue
-        task_queue.put(task_data)
+        # Create task in database with temp_path
+        create_task_db(task_id, user_id, file.filename, temp_path, settings)
 
         return jsonify({
             'taskId': task_id,
@@ -550,6 +612,9 @@ def process_audio(user_id):
         }), 202
 
     except Exception as e:
+        print(f"Error queueing file: {e}")
+        import traceback
+        traceback.print_exc()
         # Clean up temp file on error
         if os.path.exists(temp_path):
             os.remove(temp_path)

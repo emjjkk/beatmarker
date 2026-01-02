@@ -166,7 +166,7 @@ export default function HomePage() {
         return () => clearInterval(pollInterval);
     }, [queue]);
 
-    // Submit files to backend
+    // Submit files to backend (asynchronously now)
     useEffect(() => {
         const submitFiles = async () => {
             const nextItem = queue.find(item => item.status === 'waiting');
