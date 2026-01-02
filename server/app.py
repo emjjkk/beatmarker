@@ -3,7 +3,7 @@ import uuid
 import tempfile
 import json
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import jwt
@@ -69,39 +69,59 @@ MARKER_COLORS = {
 
 # ------------------ Task Queue System ------------------
 task_queue = Queue()
-task_status = {}  # {task_id: {'status': 'queued'|'processing'|'completed'|'failed', 'progress': 0-100, 'result': {}, 'error': ''}}
-task_status_lock = threading.Lock()
+processing_lock = threading.Lock()
 
-def update_task_status(task_id, status=None, progress=None, result=None, error=None):
-    """Thread-safe task status update"""
-    with task_status_lock:
-        if task_id not in task_status:
-            task_status[task_id] = {}
+def update_task_status_db(task_id, status=None, progress=None, result=None, error=None):
+    """Update task status in database"""
+    try:
+        updates = {'updated_at': datetime.utcnow().isoformat() + 'Z'}
+        
         if status is not None:
-            task_status[task_id]['status'] = status
+            updates['status'] = status
         if progress is not None:
-            task_status[task_id]['progress'] = progress
+            updates['progress'] = progress
         if result is not None:
-            task_status[task_id]['result'] = result
+            updates['result'] = result
         if error is not None:
-            task_status[task_id]['error'] = error
-        task_status[task_id]['updated_at'] = time.time()
+            updates['error'] = error
+        
+        supabase.table('processing_tasks').update(updates).eq('task_id', task_id).execute()
+    except Exception as e:
+        print(f"Error updating task status: {e}")
 
-def get_task_status(task_id):
-    """Get task status thread-safely"""
-    with task_status_lock:
-        return task_status.get(task_id, None)
+def get_task_status_db(task_id):
+    """Get task status from database"""
+    try:
+        response = supabase.table('processing_tasks').select('*').eq('task_id', task_id).execute()
+        if response.data and len(response.data) > 0:
+            return response.data[0]
+        return None
+    except Exception as e:
+        print(f"Error getting task status: {e}")
+        return None
+
+def create_task_db(task_id, user_id, file_name):
+    """Create a new task in database"""
+    try:
+        supabase.table('processing_tasks').insert({
+            'task_id': task_id,
+            'user_id': user_id,
+            'file_name': file_name,
+            'status': 'queued',
+            'progress': 0,
+            'created_at': datetime.utcnow().isoformat() + 'Z',
+            'updated_at': datetime.utcnow().isoformat() + 'Z'
+        }).execute()
+    except Exception as e:
+        print(f"Error creating task: {e}")
 
 def cleanup_old_tasks():
-    """Remove tasks older than 1 hour"""
-    current_time = time.time()
-    with task_status_lock:
-        tasks_to_remove = []
-        for task_id, status in task_status.items():
-            if current_time - status.get('updated_at', 0) > 3600:  # 1 hour
-                tasks_to_remove.append(task_id)
-        for task_id in tasks_to_remove:
-            del task_status[task_id]
+    """Remove tasks older than 2 hours from database"""
+    try:
+        cutoff_time = (datetime.utcnow() - timedelta(hours=2)).isoformat() + 'Z'
+        supabase.table('processing_tasks').delete().lt('updated_at', cutoff_time).execute()
+    except Exception as e:
+        print(f"Error cleaning up tasks: {e}")
 
 def process_audio_task(task_data):
     """Process audio file - runs in background thread"""
@@ -112,7 +132,7 @@ def process_audio_task(task_data):
     settings = task_data['settings']
     
     try:
-        update_task_status(task_id, status='processing', progress=10)
+        update_task_status_db(task_id, status='processing', progress=10)
         
         # Extract settings
         fps = settings['fps']
@@ -124,7 +144,7 @@ def process_audio_task(task_data):
         marker_name = settings['markerName']
         include_timestamps = settings['includeTimestamps']
 
-        update_task_status(task_id, progress=20)
+        update_task_status_db(task_id, progress=20)
 
         # Load audio file
         loader = MonoLoader(filename=temp_path)
@@ -132,12 +152,12 @@ def process_audio_task(task_data):
         sample_rate = loader.paramValue('sampleRate')
         duration = len(audio) / sample_rate
 
-        update_task_status(task_id, progress=35)
+        update_task_status_db(task_id, progress=35)
 
         # Detect beats
         beats = detect_beats(audio)
         
-        update_task_status(task_id, progress=50)
+        update_task_status_db(task_id, progress=50)
         
         # Detect onsets if needed
         if not beats_only:
@@ -146,12 +166,12 @@ def process_audio_task(task_data):
         else:
             combined = beats
 
-        update_task_status(task_id, progress=65)
+        update_task_status_db(task_id, progress=65)
 
         # Filter by loudness
         filtered = filter_by_loudness(audio, combined, sample_rate, loudness_percentile)
         
-        update_task_status(task_id, progress=75)
+        update_task_status_db(task_id, progress=75)
         
         # Apply smart spacing
         final_times = smart_spacing(filtered, min_gap)
@@ -159,7 +179,7 @@ def process_audio_task(task_data):
         # Calculate statistics
         stats = calculate_statistics(final_times)
 
-        update_task_status(task_id, progress=85)
+        update_task_status_db(task_id, progress=85)
 
         # Create output files
         processing_id = str(uuid.uuid4())
@@ -179,7 +199,7 @@ def process_audio_task(task_data):
         )
         edl_filename = f"{user_id}/{processing_id}_markers.edl"
         
-        update_task_status(task_id, progress=90)
+        update_task_status_db(task_id, progress=90)
         
         # Upload files to Supabase storage
         try:
@@ -202,7 +222,7 @@ def process_audio_task(task_data):
         except Exception as e:
             raise Exception(f'Failed to upload files: {str(e)}')
 
-        update_task_status(task_id, progress=95)
+        update_task_status_db(task_id, progress=95)
 
         # Save to database
         try:
@@ -236,10 +256,10 @@ def process_audio_task(task_data):
             'maxSpacing': stats['max_spacing']
         }
 
-        update_task_status(task_id, status='completed', progress=100, result=result)
+        update_task_status_db(task_id, status='completed', progress=100, result=result)
 
     except Exception as e:
-        update_task_status(task_id, status='failed', progress=0, error=str(e))
+        update_task_status_db(task_id, status='failed', progress=0, error=str(e))
     
     finally:
         # Clean up temp file
@@ -251,18 +271,26 @@ def process_audio_task(task_data):
 
 def task_worker():
     """Background worker thread that processes tasks from the queue"""
+    cleanup_counter = 0
+    
     while True:
         try:
-            task_data = task_queue.get(timeout=1)
+            task_data = task_queue.get(timeout=5)
             if task_data is None:  # Shutdown signal
                 break
             
-            process_audio_task(task_data)
+            # Acquire lock to ensure only one task processes at a time
+            with processing_lock:
+                process_audio_task(task_data)
+            
             task_queue.task_done()
             
         except Empty:
-            # Clean up old tasks periodically
-            cleanup_old_tasks()
+            # Clean up old tasks periodically (every 50 iterations = ~4 minutes)
+            cleanup_counter += 1
+            if cleanup_counter >= 50:
+                cleanup_old_tasks()
+                cleanup_counter = 0
             continue
         except Exception as e:
             print(f"Worker error: {e}")
@@ -500,6 +528,10 @@ def process_audio(user_id):
 
         # Create task
         task_id = str(uuid.uuid4())
+        
+        # Create task in database
+        create_task_db(task_id, user_id, file.filename)
+        
         task_data = {
             'task_id': task_id,
             'temp_path': temp_path,
@@ -507,9 +539,6 @@ def process_audio(user_id):
             'file_name': file.filename,
             'settings': settings
         }
-
-        # Initialize task status
-        update_task_status(task_id, status='queued', progress=0)
 
         # Add to queue
         task_queue.put(task_data)
@@ -530,12 +559,21 @@ def process_audio(user_id):
 @require_auth
 def get_task_status_route(user_id, task_id):
     """Get status of a processing task"""
-    status = get_task_status(task_id)
+    task = get_task_status_db(task_id)
     
-    if not status:
+    if not task:
         return jsonify({'error': 'Task not found'}), 404
     
-    return jsonify(status), 200
+    # Verify ownership
+    if task.get('user_id') != user_id:
+        return jsonify({'error': 'Access denied'}), 403
+    
+    return jsonify({
+        'status': task.get('status'),
+        'progress': task.get('progress', 0),
+        'result': task.get('result'),
+        'error': task.get('error')
+    }), 200
 
 @app.route('/api/history', methods=['GET'])
 @require_auth
