@@ -20,7 +20,9 @@ from essentia.standard import (
     BeatTrackerMultiFeature,
     Loudness
 )
-import io
+import threading
+from queue import Queue, Empty
+import time
 
 load_dotenv()
 
@@ -40,7 +42,6 @@ CORS(
     }}
 )
 
-
 # Configuration
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
 app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
@@ -54,7 +55,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 # JWT Secret
 JWT_SECRET = os.getenv('SUPABASE_JWT_SECRET')
 
-# Marker color codes for EDL (common video editing software colors)
+# Marker color codes for EDL
 MARKER_COLORS = {
     'red': '001',
     'blue': '002',
@@ -65,6 +66,210 @@ MARKER_COLORS = {
     'magenta': '007',
     'orange': '008'
 }
+
+# ------------------ Task Queue System ------------------
+task_queue = Queue()
+task_status = {}  # {task_id: {'status': 'queued'|'processing'|'completed'|'failed', 'progress': 0-100, 'result': {}, 'error': ''}}
+task_status_lock = threading.Lock()
+
+def update_task_status(task_id, status=None, progress=None, result=None, error=None):
+    """Thread-safe task status update"""
+    with task_status_lock:
+        if task_id not in task_status:
+            task_status[task_id] = {}
+        if status is not None:
+            task_status[task_id]['status'] = status
+        if progress is not None:
+            task_status[task_id]['progress'] = progress
+        if result is not None:
+            task_status[task_id]['result'] = result
+        if error is not None:
+            task_status[task_id]['error'] = error
+        task_status[task_id]['updated_at'] = time.time()
+
+def get_task_status(task_id):
+    """Get task status thread-safely"""
+    with task_status_lock:
+        return task_status.get(task_id, None)
+
+def cleanup_old_tasks():
+    """Remove tasks older than 1 hour"""
+    current_time = time.time()
+    with task_status_lock:
+        tasks_to_remove = []
+        for task_id, status in task_status.items():
+            if current_time - status.get('updated_at', 0) > 3600:  # 1 hour
+                tasks_to_remove.append(task_id)
+        for task_id in tasks_to_remove:
+            del task_status[task_id]
+
+def process_audio_task(task_data):
+    """Process audio file - runs in background thread"""
+    task_id = task_data['task_id']
+    temp_path = task_data['temp_path']
+    user_id = task_data['user_id']
+    file_name = task_data['file_name']
+    settings = task_data['settings']
+    
+    try:
+        update_task_status(task_id, status='processing', progress=10)
+        
+        # Extract settings
+        fps = settings['fps']
+        sensitivity = settings['sensitivity']
+        loudness_percentile = settings['loudness']
+        min_gap = settings['minGap']
+        beats_only = settings['beatsOnly']
+        marker_color = settings['markerColor']
+        marker_name = settings['markerName']
+        include_timestamps = settings['includeTimestamps']
+
+        update_task_status(task_id, progress=20)
+
+        # Load audio file
+        loader = MonoLoader(filename=temp_path)
+        audio = loader()
+        sample_rate = loader.paramValue('sampleRate')
+        duration = len(audio) / sample_rate
+
+        update_task_status(task_id, progress=35)
+
+        # Detect beats
+        beats = detect_beats(audio)
+        
+        update_task_status(task_id, progress=50)
+        
+        # Detect onsets if needed
+        if not beats_only:
+            onsets = detect_onsets(audio, sample_rate, sensitivity)
+            combined = snap_onsets_to_beats(beats, onsets)
+        else:
+            combined = beats
+
+        update_task_status(task_id, progress=65)
+
+        # Filter by loudness
+        filtered = filter_by_loudness(audio, combined, sample_rate, loudness_percentile)
+        
+        update_task_status(task_id, progress=75)
+        
+        # Apply smart spacing
+        final_times = smart_spacing(filtered, min_gap)
+        
+        # Calculate statistics
+        stats = calculate_statistics(final_times)
+
+        update_task_status(task_id, progress=85)
+
+        # Create output files
+        processing_id = str(uuid.uuid4())
+        timestamp = datetime.utcnow().isoformat() + 'Z'
+        
+        # Create beats text file
+        beats_content = "\n".join([format_timestamp(t) for t in final_times])
+        beats_filename = f"{user_id}/{processing_id}_beats.txt"
+        
+        # Create EDL markers file
+        edl_content = create_edl_markers(
+            final_times, 
+            fps=fps, 
+            color=marker_color, 
+            name_prefix=marker_name,
+            include_timestamps=include_timestamps
+        )
+        edl_filename = f"{user_id}/{processing_id}_markers.edl"
+        
+        update_task_status(task_id, progress=90)
+        
+        # Upload files to Supabase storage
+        try:
+            supabase.storage.from_('beatmarker-files').upload(
+                beats_filename,
+                beats_content.encode('utf-8'),
+                {'content-type': 'text/plain'}
+            )
+            
+            supabase.storage.from_('beatmarker-files').upload(
+                edl_filename,
+                edl_content.encode('utf-8'),
+                {'content-type': 'text/plain'}
+            )
+            
+            # Get public URLs
+            beats_url = supabase.storage.from_('beatmarker-files').get_public_url(beats_filename)
+            markers_url = supabase.storage.from_('beatmarker-files').get_public_url(edl_filename)
+            
+        except Exception as e:
+            raise Exception(f'Failed to upload files: {str(e)}')
+
+        update_task_status(task_id, progress=95)
+
+        # Save to database
+        try:
+            supabase.table('processing_history').insert({
+                'id': processing_id,
+                'user_id': user_id,
+                'file_name': file_name,
+                'settings': settings,
+                'beats_url': beats_url,
+                'markers_url': markers_url,
+                'beats_count': stats['count'],
+                'duration_seconds': duration,
+                'avg_spacing': stats['avg_spacing'],
+                'created_at': timestamp
+            }).execute()
+        except Exception as e:
+            raise Exception(f'Failed to save to database: {str(e)}')
+
+        # Prepare result
+        result = {
+            'id': processing_id,
+            'fileName': file_name,
+            'settings': settings,
+            'timestamp': timestamp,
+            'beatsUrl': beats_url,
+            'markersUrl': markers_url,
+            'beatsCount': stats['count'],
+            'duration': duration,
+            'avgSpacing': stats['avg_spacing'],
+            'minSpacing': stats['min_spacing'],
+            'maxSpacing': stats['max_spacing']
+        }
+
+        update_task_status(task_id, status='completed', progress=100, result=result)
+
+    except Exception as e:
+        update_task_status(task_id, status='failed', progress=0, error=str(e))
+    
+    finally:
+        # Clean up temp file
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass
+
+def task_worker():
+    """Background worker thread that processes tasks from the queue"""
+    while True:
+        try:
+            task_data = task_queue.get(timeout=1)
+            if task_data is None:  # Shutdown signal
+                break
+            
+            process_audio_task(task_data)
+            task_queue.task_done()
+            
+        except Empty:
+            # Clean up old tasks periodically
+            cleanup_old_tasks()
+            continue
+        except Exception as e:
+            print(f"Worker error: {e}")
+
+# Start background worker thread
+worker_thread = threading.Thread(target=task_worker, daemon=True)
+worker_thread.start()
 
 # ------------------ Authentication Middleware ------------------
 def get_user_id_from_token():
@@ -215,7 +420,6 @@ def create_edl_markers(times, fps=30, color='red', name_prefix='Beat', include_t
     for i, t in enumerate(times, 1):
         tc = seconds_to_timecode(t, fps)
         
-        # Create marker name with optional timestamp
         if include_timestamps:
             timestamp_str = format_timestamp(t)
             marker_name = f"{name_prefix} {i} [{timestamp_str}]"
@@ -256,7 +460,7 @@ def health_check():
 @app.route('/api/process', methods=['POST'])
 @require_auth
 def process_audio(user_id):
-    """Process audio file and detect beats/onsets"""
+    """Queue audio file for processing"""
     if 'file' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
 
@@ -283,71 +487,6 @@ def process_audio(user_id):
         marker_name = request.form.get('markerName', 'Beat')
         include_timestamps = request.form.get('includeTimestamps', 'true').lower() == 'true'
 
-        # Load audio file
-        loader = MonoLoader(filename=temp_path)
-        audio = loader()
-        sample_rate = loader.paramValue('sampleRate')
-        duration = len(audio) / sample_rate
-
-        # Detect beats
-        beats = detect_beats(audio)
-        
-        # Detect onsets if needed
-        if not beats_only:
-            onsets = detect_onsets(audio, sample_rate, sensitivity)
-            combined = snap_onsets_to_beats(beats, onsets)
-        else:
-            combined = beats
-
-        # Filter by loudness
-        filtered = filter_by_loudness(audio, combined, sample_rate, loudness_percentile)
-        
-        # Apply smart spacing
-        final_times = smart_spacing(filtered, min_gap)
-        
-        # Calculate statistics
-        stats = calculate_statistics(final_times)
-
-        # Create output files
-        processing_id = str(uuid.uuid4())
-        timestamp = datetime.utcnow().isoformat() + 'Z'
-        
-        # Create beats text file
-        beats_content = "\n".join([format_timestamp(t) for t in final_times])
-        beats_filename = f"{user_id}/{processing_id}_beats.txt"
-        
-        # Create EDL markers file with custom options
-        edl_content = create_edl_markers(
-            final_times, 
-            fps=fps, 
-            color=marker_color, 
-            name_prefix=marker_name,
-            include_timestamps=include_timestamps
-        )
-        edl_filename = f"{user_id}/{processing_id}_markers.edl"
-        
-        # Upload files to Supabase storage
-        try:
-            supabase.storage.from_('beatmarker-files').upload(
-                beats_filename,
-                beats_content.encode('utf-8'),
-                {'content-type': 'text/plain'}
-            )
-            
-            supabase.storage.from_('beatmarker-files').upload(
-                edl_filename,
-                edl_content.encode('utf-8'),
-                {'content-type': 'text/plain'}
-            )
-            
-            # Get public URLs
-            beats_url = supabase.storage.from_('beatmarker-files').get_public_url(beats_filename)
-            markers_url = supabase.storage.from_('beatmarker-files').get_public_url(edl_filename)
-            
-        except Exception as e:
-            return jsonify({'error': f'Failed to upload files: {str(e)}'}), 500
-
-        # Save to database
         settings = {
             'fps': fps,
             'sensitivity': sensitivity,
@@ -358,47 +497,45 @@ def process_audio(user_id):
             'markerName': marker_name,
             'includeTimestamps': include_timestamps
         }
-        
-        try:
-            supabase.table('processing_history').insert({
-                'id': processing_id,
-                'user_id': user_id,
-                'file_name': file.filename,
-                'settings': settings,
-                'beats_url': beats_url,
-                'markers_url': markers_url,
-                'beats_count': stats['count'],
-                'duration_seconds': duration,
-                'avg_spacing': stats['avg_spacing'],
-                'created_at': timestamp
-            }).execute()
-        except Exception as e:
-            return jsonify({'error': f'Failed to save to database: {str(e)}'}), 500
 
-        # Prepare response
-        result = {
-            'id': processing_id,
-            'fileName': file.filename,
-            'settings': settings,
-            'timestamp': timestamp,
-            'beatsUrl': beats_url,
-            'markersUrl': markers_url,
-            'beatsCount': stats['count'],
-            'duration': duration,
-            'avgSpacing': stats['avg_spacing'],
-            'minSpacing': stats['min_spacing'],
-            'maxSpacing': stats['max_spacing']
+        # Create task
+        task_id = str(uuid.uuid4())
+        task_data = {
+            'task_id': task_id,
+            'temp_path': temp_path,
+            'user_id': user_id,
+            'file_name': file.filename,
+            'settings': settings
         }
 
-        return jsonify(result), 200
+        # Initialize task status
+        update_task_status(task_id, status='queued', progress=0)
+
+        # Add to queue
+        task_queue.put(task_data)
+
+        return jsonify({
+            'taskId': task_id,
+            'status': 'queued',
+            'message': 'File queued for processing'
+        }), 202
 
     except Exception as e:
-        return jsonify({'error': f'Processing failed: {str(e)}'}), 500
-    
-    finally:
-        # Clean up temp file
+        # Clean up temp file on error
         if os.path.exists(temp_path):
             os.remove(temp_path)
+        return jsonify({'error': f'Failed to queue file: {str(e)}'}), 500
+
+@app.route('/api/task/<task_id>', methods=['GET'])
+@require_auth
+def get_task_status_route(user_id, task_id):
+    """Get status of a processing task"""
+    status = get_task_status(task_id)
+    
+    if not status:
+        return jsonify({'error': 'Task not found'}), 404
+    
+    return jsonify(status), 200
 
 @app.route('/api/history', methods=['GET'])
 @require_auth

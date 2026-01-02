@@ -31,10 +31,11 @@ interface ProcessingResult {
 interface QueueItem {
     id: string;
     file: File;
-    status: 'waiting' | 'processing' | 'completed' | 'failed';
+    status: 'waiting' | 'queued' | 'processing' | 'completed' | 'failed';
     progress: number;
     result?: ProcessingResult;
     error?: string;
+    taskId?: string;
 }
 
 export default function HomePage() {
@@ -54,13 +55,9 @@ export default function HomePage() {
     const [markerName, setMarkerName] = useState('Beat');
     const [includeTimestamps, setIncludeTimestamps] = useState(true);
     const [results, setResults] = useState<ProcessingResult[]>([]);
-    const [attemptsLeft, setAttemptsLeft] = useState(10);
-    const [resetTime, setResetTime] = useState('24h');
     const [optionsExpanded, setOptionsExpanded] = useState(false);
     const [outputExpanded, setOutputExpanded] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [showAccessModal, setShowAccessModal] = useState(false);
-    const [isPro, setIsPro] = useState(false);
     const supabase = createClient();
 
     useEffect(() => {
@@ -114,14 +111,68 @@ export default function HomePage() {
         }
     }, [user]);
 
-    // Process queue items sequentially
+    // Poll task status for queued/processing items
     useEffect(() => {
-        const processQueue = async () => {
+        const pollInterval = setInterval(async () => {
+            const itemsToCheck = queue.filter(
+                item => (item.status === 'queued' || item.status === 'processing') && item.taskId
+            );
+
+            if (itemsToCheck.length === 0) return;
+
+            const { data: { session } } = await supabase.auth.getSession();
+            if (!session) return;
+
+            for (const item of itemsToCheck) {
+                try {
+                    const response = await fetch(`${endpointUrl}/api/task/${item.taskId}`, {
+                        headers: {
+                            'Authorization': `Bearer ${session.access_token}`
+                        }
+                    });
+
+                    if (!response.ok) continue;
+
+                    const taskStatus = await response.json();
+
+                    updateQueueItem(item.id, {
+                        status: taskStatus.status,
+                        progress: taskStatus.progress || 0,
+                        result: taskStatus.result,
+                        error: taskStatus.error
+                    });
+
+                    // If completed, add to results and remove from queue after delay
+                    if (taskStatus.status === 'completed' && taskStatus.result) {
+                        setResults(prev => [taskStatus.result, ...prev]);
+                        setTimeout(() => {
+                            setQueue(prev => prev.filter(q => q.id !== item.id));
+                        }, 3000);
+                    }
+
+                    // If failed, remove from queue after delay
+                    if (taskStatus.status === 'failed') {
+                        setTimeout(() => {
+                            setQueue(prev => prev.filter(q => q.id !== item.id));
+                        }, 5000);
+                    }
+
+                } catch (error) {
+                    console.error(`Error polling task ${item.taskId}:`, error);
+                }
+            }
+        }, 2000); // Poll every 2 seconds
+
+        return () => clearInterval(pollInterval);
+    }, [queue]);
+
+    // Submit files to backend
+    useEffect(() => {
+        const submitFiles = async () => {
             const nextItem = queue.find(item => item.status === 'waiting');
             if (!nextItem || isProcessing) return;
 
             setIsProcessing(true);
-            updateQueueItem(nextItem.id, { status: 'processing', progress: 10 });
 
             try {
                 const formData = new FormData();
@@ -140,8 +191,6 @@ export default function HomePage() {
                     throw new Error('Not authenticated');
                 }
 
-                updateQueueItem(nextItem.id, { progress: 30 });
-
                 const res = await fetch(`${endpointUrl}/api/process`, {
                     method: 'POST',
                     headers: {
@@ -150,42 +199,36 @@ export default function HomePage() {
                     body: formData
                 });
 
-                updateQueueItem(nextItem.id, { progress: 80 });
-
                 if (!res.ok) {
-                    const errorText = await res.text();
-                    throw new Error(errorText || 'Processing failed');
+                    const errorData = await res.json();
+                    throw new Error(errorData.error || 'Processing failed');
                 }
 
                 const result = await res.json();
 
+                // Update queue item with task ID
                 updateQueueItem(nextItem.id, {
-                    status: 'completed',
-                    progress: 100,
-                    result
+                    status: 'queued',
+                    taskId: result.taskId
                 });
-
-                setResults(prev => [result, ...prev]);
-                setAttemptsLeft(prev => Math.max(0, prev - 1));
-
-                // Remove completed item after 3 seconds
-                setTimeout(() => {
-                    setQueue(prev => prev.filter(item => item.id !== nextItem.id));
-                }, 3000);
 
             } catch (err) {
-                console.error('Error processing audio:', err);
+                console.error('Error submitting file:', err);
                 updateQueueItem(nextItem.id, {
                     status: 'failed',
-                    progress: 0,
-                    error: err instanceof Error ? err.message : 'Processing failed'
+                    error: err instanceof Error ? err.message : 'Failed to submit file'
                 });
+
+                // Remove failed item after delay
+                setTimeout(() => {
+                    setQueue(prev => prev.filter(item => item.id !== nextItem.id));
+                }, 5000);
             } finally {
                 setIsProcessing(false);
             }
         };
 
-        processQueue();
+        submitFiles();
     }, [queue, isProcessing]);
 
     const updateQueueItem = (id: string, updates: Partial<QueueItem>) => {
@@ -282,9 +325,8 @@ export default function HomePage() {
 
             if (!response.ok) throw new Error('Delete failed');
 
-            // Remove from local state
-            setError('Result has been deleted');
             setResults(prev => prev.filter(result => result.id !== processingId));
+            setError(null);
         } catch (error) {
             console.error('Delete error:', error);
             setError('Failed to delete result');
@@ -294,6 +336,7 @@ export default function HomePage() {
     const getStatusColor = (status: QueueItem['status']) => {
         switch (status) {
             case 'waiting': return 'text-yellow-500';
+            case 'queued': return 'text-blue-400';
             case 'processing': return 'text-blue-500';
             case 'completed': return 'text-green-500';
             case 'failed': return 'text-red-500';
@@ -303,9 +346,20 @@ export default function HomePage() {
     const getStatusIcon = (status: QueueItem['status']) => {
         switch (status) {
             case 'waiting': return <FaClock />;
+            case 'queued': return <FaClock className="animate-pulse" />;
             case 'processing': return <FaSpinner className="animate-spin" />;
             case 'completed': return <FaCheck />;
             case 'failed': return <FaXmark />;
+        }
+    };
+
+    const getStatusText = (status: QueueItem['status']) => {
+        switch (status) {
+            case 'waiting': return 'Waiting to submit';
+            case 'queued': return 'Queued on server';
+            case 'processing': return 'Processing';
+            case 'completed': return 'Completed';
+            case 'failed': return 'Failed';
         }
     };
 
@@ -391,7 +445,10 @@ export default function HomePage() {
                                                     <span className={`${getStatusColor(item.status)}`}>
                                                         {getStatusIcon(item.status)}
                                                     </span>
-                                                    <span className="text-sm text-neutral-300 truncate">{item.file.name}</span>
+                                                    <div className="flex-1 min-w-0">
+                                                        <p className="text-sm text-neutral-300 truncate">{item.file.name}</p>
+                                                        <p className="text-xs text-neutral-500">{getStatusText(item.status)}</p>
+                                                    </div>
                                                 </div>
                                                 {item.status === 'waiting' && (
                                                     <button
@@ -402,7 +459,7 @@ export default function HomePage() {
                                                     </button>
                                                 )}
                                             </div>
-                                            {item.status === 'processing' && (
+                                            {(item.status === 'queued' || item.status === 'processing') && (
                                                 <div className="w-full bg-neutral-800 rounded-full h-1.5">
                                                     <div
                                                         className="bg-blue-500 h-1.5 rounded-full transition-all duration-300"
@@ -707,7 +764,7 @@ export default function HomePage() {
                     </div>
                 </div>
             </main>
-            <div className="absolute bottom-5 right-5 px-4 py-2 text-white bg-neutral-800 flex items-center gap-2 rounded text-sm" onClick={() => setIsModalOpen(true)}><FaHelicopter /> Help & Info</div>
+            <div className="absolute bottom-5 right-5 px-4 py-2 text-white bg-neutral-800 flex items-center gap-2 rounded text-sm cursor-pointer" onClick={() => setIsModalOpen(true)}><FaHelicopter /> Help & Info</div>
             <InfoModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} />
         </div>
     );
