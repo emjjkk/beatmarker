@@ -1,9 +1,9 @@
 "use client"
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { createClient } from '@/utils/supabase/client';
 import { User } from '@supabase/supabase-js';
 import { TbActivityHeartbeat } from "react-icons/tb";
-import { FaHelicopter, FaCircleUser, FaUpload, FaSpinner, FaDownload, FaCircleInfo, FaChevronDown, FaChevronUp, FaCat, FaCheck, FaXmark, FaProductHunt, FaClock, FaTrash } from "react-icons/fa6";
+import { FaHelicopter, FaCircleUser, FaUpload, FaSpinner, FaDownload, FaCircleInfo, FaChevronDown, FaChevronUp, FaCat, FaCheck, FaXmark, FaProductHunt, FaClock, FaTrash, FaHourglass } from "react-icons/fa6";
 import { SiBuymeacoffee } from "react-icons/si";
 import InfoModal from '@/components/info';
 
@@ -30,11 +30,12 @@ interface ProcessingResult {
 
 interface QueueItem {
     id: string;
-    file: File;
-    status: 'waiting' | 'processing' | 'completed' | 'failed';
-    progress: number;
+    fileName: string;
+    status: 'pending' | 'processing' | 'completed' | 'failed';
+    position?: number;
     result?: ProcessingResult;
     error?: string;
+    createdAt: string;
 }
 
 export default function HomePage() {
@@ -43,8 +44,7 @@ export default function HomePage() {
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [isLoading, setIsLoading] = useState(true);
     const [isDragging, setIsDragging] = useState(false);
-    const [queue, setQueue] = useState<QueueItem[]>([]);
-    const [isProcessing, setIsProcessing] = useState(false);
+    const [queueItems, setQueueItems] = useState<QueueItem[]>([]);
     const [fps, setFps] = useState(30);
     const [sensitivity, setSensitivity] = useState('low');
     const [loudness, setLoudness] = useState(70);
@@ -54,13 +54,9 @@ export default function HomePage() {
     const [markerName, setMarkerName] = useState('Beat');
     const [includeTimestamps, setIncludeTimestamps] = useState(true);
     const [results, setResults] = useState<ProcessingResult[]>([]);
-    const [attemptsLeft, setAttemptsLeft] = useState(10);
-    const [resetTime, setResetTime] = useState('24h');
     const [optionsExpanded, setOptionsExpanded] = useState(false);
     const [outputExpanded, setOutputExpanded] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [showAccessModal, setShowAccessModal] = useState(false);
-    const [isPro, setIsPro] = useState(false);
     const supabase = createClient();
 
     useEffect(() => {
@@ -108,91 +104,79 @@ export default function HomePage() {
         }
     };
 
+    const fetchQueueStatus = useCallback(async () => {
+        const { data: { session } } = await supabase.auth.getSession();
+
+        if (session) {
+            try {
+                const response = await fetch(`${endpointUrl}/api/queue/user`, {
+                    headers: {
+                        'Authorization': `Bearer ${session.access_token}`
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error('Failed to fetch queue');
+                }
+
+                const data = await response.json();
+                
+                // Update queue items
+                setQueueItems(data);
+
+                // Check for completed items
+                const completedIds = queueItems
+                    .filter(item => item.status === 'processing' || item.status === 'pending')
+                    .map(item => item.id);
+
+                for (const queueId of completedIds) {
+                    const statusResponse = await fetch(`${endpointUrl}/api/queue/status/${queueId}`, {
+                        headers: {
+                            'Authorization': `Bearer ${session.access_token}`
+                        }
+                    });
+
+                    if (statusResponse.ok) {
+                        const statusData = await statusResponse.json();
+                        
+                        if (statusData.status === 'completed' && statusData.result) {
+                            // Add to results
+                            setResults(prev => [statusData.result, ...prev]);
+                            
+                            // Remove from queue after a delay
+                            setTimeout(() => {
+                                setQueueItems(prev => prev.filter(item => item.id !== queueId));
+                            }, 3000);
+                        } else if (statusData.status === 'failed') {
+                            setError(statusData.error || 'Processing failed');
+                            
+                            // Remove failed item after delay
+                            setTimeout(() => {
+                                setQueueItems(prev => prev.filter(item => item.id !== queueId));
+                            }, 5000);
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error('Error fetching queue:', error);
+            }
+        }
+    }, [queueItems]);
+
+    // Poll queue status every 3 seconds
+    useEffect(() => {
+        if (user && queueItems.length > 0) {
+            const interval = setInterval(fetchQueueStatus, 3000);
+            return () => clearInterval(interval);
+        }
+    }, [user, queueItems.length, fetchQueueStatus]);
+
     useEffect(() => {
         if (user) {
             fetchHistory();
+            fetchQueueStatus();
         }
     }, [user]);
-
-    // Process queue items sequentially
-    useEffect(() => {
-        const processQueue = async () => {
-            const nextItem = queue.find(item => item.status === 'waiting');
-            if (!nextItem || isProcessing) return;
-
-            setIsProcessing(true);
-            updateQueueItem(nextItem.id, { status: 'processing', progress: 10 });
-
-            try {
-                const formData = new FormData();
-                formData.append('file', nextItem.file);
-                formData.append('fps', fps.toString());
-                formData.append('sensitivity', sensitivity);
-                formData.append('loudness', loudness.toString());
-                formData.append('minGap', minGap.toString());
-                formData.append('beatsOnly', beatsOnly.toString());
-                formData.append('markerColor', markerColor);
-                formData.append('markerName', markerName);
-                formData.append('includeTimestamps', includeTimestamps.toString());
-
-                const { data: { session } } = await supabase.auth.getSession();
-                if (!session) {
-                    throw new Error('Not authenticated');
-                }
-
-                updateQueueItem(nextItem.id, { progress: 30 });
-
-                const res = await fetch(`${endpointUrl}/api/process`, {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${session.access_token}`
-                    },
-                    body: formData
-                });
-
-                updateQueueItem(nextItem.id, { progress: 80 });
-
-                if (!res.ok) {
-                    const errorText = await res.text();
-                    throw new Error(errorText || 'Processing failed');
-                }
-
-                const result = await res.json();
-
-                updateQueueItem(nextItem.id, {
-                    status: 'completed',
-                    progress: 100,
-                    result
-                });
-
-                setResults(prev => [result, ...prev]);
-                setAttemptsLeft(prev => Math.max(0, prev - 1));
-
-                // Remove completed item after 3 seconds
-                setTimeout(() => {
-                    setQueue(prev => prev.filter(item => item.id !== nextItem.id));
-                }, 3000);
-
-            } catch (err) {
-                console.error('Error processing audio:', err);
-                updateQueueItem(nextItem.id, {
-                    status: 'failed',
-                    progress: 0,
-                    error: err instanceof Error ? err.message : 'Processing failed'
-                });
-            } finally {
-                setIsProcessing(false);
-            }
-        };
-
-        processQueue();
-    }, [queue, isProcessing]);
-
-    const updateQueueItem = (id: string, updates: Partial<QueueItem>) => {
-        setQueue(prev => prev.map(item =>
-            item.id === id ? { ...item, ...updates } : item
-        ));
-    };
 
     const handleDrop = (e: React.DragEvent) => {
         e.preventDefault();
@@ -205,7 +189,7 @@ export default function HomePage() {
             return;
         }
 
-        audioFiles.forEach(file => addToQueue(file));
+        audioFiles.forEach(file => uploadToQueue(file));
         setError(null);
     };
 
@@ -221,23 +205,55 @@ export default function HomePage() {
     const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
         const selectedFiles = e.target.files;
         if (selectedFiles) {
-            Array.from(selectedFiles).forEach(file => addToQueue(file));
+            Array.from(selectedFiles).forEach(file => uploadToQueue(file));
             setError(null);
         }
     };
 
-    const addToQueue = (file: File) => {
-        const queueItem: QueueItem = {
-            id: `queue-${Date.now()}-${Math.random()}`,
-            file,
-            status: 'waiting',
-            progress: 0
-        };
-        setQueue(prev => [...prev, queueItem]);
-    };
+    const uploadToQueue = async (file: File) => {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session) return;
 
-    const removeFromQueue = (id: string) => {
-        setQueue(prev => prev.filter(item => item.id !== id));
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('fps', fps.toString());
+            formData.append('sensitivity', sensitivity);
+            formData.append('loudness', loudness.toString());
+            formData.append('minGap', minGap.toString());
+            formData.append('beatsOnly', beatsOnly.toString());
+            formData.append('markerColor', markerColor);
+            formData.append('markerName', markerName);
+            formData.append('includeTimestamps', includeTimestamps.toString());
+
+            const response = await fetch(`${endpointUrl}/api/queue/add`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${session.access_token}`
+                },
+                body: formData
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(errorText || 'Failed to add to queue');
+            }
+
+            const data = await response.json();
+            
+            // Add to local queue state
+            setQueueItems(prev => [...prev, {
+                id: data.queueId,
+                fileName: file.name,
+                status: 'pending',
+                position: data.position,
+                createdAt: new Date().toISOString()
+            }]);
+
+        } catch (err) {
+            console.error('Error uploading to queue:', err);
+            setError(err instanceof Error ? err.message : 'Upload failed');
+        }
     };
 
     const handleDownload = async (url: string, filename: string) => {
@@ -282,7 +298,6 @@ export default function HomePage() {
 
             if (!response.ok) throw new Error('Delete failed');
 
-            // Remove from local state
             setError('Result has been deleted');
             setResults(prev => prev.filter(result => result.id !== processingId));
         } catch (error) {
@@ -293,7 +308,7 @@ export default function HomePage() {
 
     const getStatusColor = (status: QueueItem['status']) => {
         switch (status) {
-            case 'waiting': return 'text-yellow-500';
+            case 'pending': return 'text-yellow-500';
             case 'processing': return 'text-blue-500';
             case 'completed': return 'text-green-500';
             case 'failed': return 'text-red-500';
@@ -302,11 +317,25 @@ export default function HomePage() {
 
     const getStatusIcon = (status: QueueItem['status']) => {
         switch (status) {
-            case 'waiting': return <FaClock />;
+            case 'pending': return <FaHourglass />;
             case 'processing': return <FaSpinner className="animate-spin" />;
             case 'completed': return <FaCheck />;
             case 'failed': return <FaXmark />;
         }
+    };
+
+    const getQueueMessage = (item: QueueItem) => {
+        if (item.status === 'pending' && item.position) {
+            if (item.position === 1) {
+                return 'Next in queue';
+            }
+            const estimatedWait = (item.position - 1) * 7;
+            return `Position ${item.position} • ~${estimatedWait}s wait`;
+        }
+        if (item.status === 'processing') {
+            return 'Processing now...';
+        }
+        return '';
     };
 
     if (isLoading) {
@@ -380,34 +409,26 @@ export default function HomePage() {
                         </div>
 
                         {/* Processing Queue */}
-                        {queue.length > 0 && (
+                        {queueItems.length > 0 && (
                             <div>
                                 <h2 className="text-sm font-medium mb-3 text-neutral-300">Processing Queue</h2>
                                 <div className="space-y-2">
-                                    {queue.map((item) => (
+                                    {queueItems.map((item) => (
                                         <div key={item.id} className="bg-neutral-900 border border-neutral-800 rounded-lg p-3">
                                             <div className="flex items-center justify-between mb-2">
                                                 <div className="flex items-center gap-2 flex-1 min-w-0">
                                                     <span className={`${getStatusColor(item.status)}`}>
                                                         {getStatusIcon(item.status)}
                                                     </span>
-                                                    <span className="text-sm text-neutral-300 truncate">{item.file.name}</span>
+                                                    <div className="flex-1 min-w-0">
+                                                        <p className="text-sm text-neutral-300 truncate">{item.fileName}</p>
+                                                        <p className="text-xs text-neutral-500">{getQueueMessage(item)}</p>
+                                                    </div>
                                                 </div>
-                                                {item.status === 'waiting' && (
-                                                    <button
-                                                        onClick={() => removeFromQueue(item.id)}
-                                                        className="text-neutral-500 hover:text-neutral-300 transition-colors"
-                                                    >
-                                                        <FaXmark />
-                                                    </button>
-                                                )}
                                             </div>
                                             {item.status === 'processing' && (
                                                 <div className="w-full bg-neutral-800 rounded-full h-1.5">
-                                                    <div
-                                                        className="bg-blue-500 h-1.5 rounded-full transition-all duration-300"
-                                                        style={{ width: `${item.progress}%` }}
-                                                    />
+                                                    <div className="bg-blue-500 h-1.5 rounded-full animate-pulse w-full" />
                                                 </div>
                                             )}
                                             {item.status === 'failed' && item.error && (
@@ -696,7 +717,7 @@ export default function HomePage() {
                                 </div>
                             ))}
 
-                            {results.length === 0 && queue.length === 0 && (
+                            {results.length === 0 && queueItems.length === 0 && (
                                 <div className="text-center flex items-center justify-center flex-col py-15 bg-neutral-900 rounded text-neutral-600">
                                     <FaCat className="text-3xl w-fit mb-2" />
                                     <p className="text-sm">No results yet</p>
@@ -707,7 +728,7 @@ export default function HomePage() {
                     </div>
                 </div>
             </main>
-            <div className="absolute bottom-5 right-5 px-4 py-2 text-white bg-neutral-800 flex items-center gap-2 rounded text-sm" onClick={() => setIsModalOpen(true)}><FaHelicopter /> Help & Info</div>
+            <div className="absolute bottom-5 right-5 px-4 py-2 text-white bg-neutral-800 flex items-center gap-2 rounded text-sm cursor-pointer" onClick={() => setIsModalOpen(true)}><FaHelicopter /> Help & Info</div>
             <InfoModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} />
         </div>
     );
