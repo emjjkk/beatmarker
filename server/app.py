@@ -470,8 +470,8 @@ def add_to_queue(user_id):
             {'content-type': file.content_type or 'audio/mpeg'}
         )
 
-        # Add to queue
-        response = supabase.table('processing_queue').insert({
+        # Add to queue (position will be calculated on retrieval)
+        supabase.table('processing_queue').insert({
             'id': queue_id,
             'user_id': user_id,
             'file_name': file.filename,
@@ -479,20 +479,23 @@ def add_to_queue(user_id):
             'status': 'pending'
         }).execute()
 
-        # Get queue position
-        position_response = supabase.table('processing_queue')\
-            .select('position')\
-            .eq('id', queue_id)\
-            .single()\
+        # Calculate position dynamically
+        pending_items = supabase.table('processing_queue')\
+            .select('id, created_at')\
+            .eq('status', 'pending')\
+            .order('created_at')\
             .execute()
+        
+        position = next((i + 1 for i, item in enumerate(pending_items.data) if item['id'] == queue_id), None)
 
         return jsonify({
             'queueId': queue_id,
-            'position': position_response.data['position'],
+            'position': position,
             'status': 'pending'
         }), 200
 
     except Exception as e:
+        print(f"Error adding to queue: {str(e)}")
         return jsonify({'error': f'Failed to add to queue: {str(e)}'}), 500
 
 @app.route('/api/queue/status/<queue_id>', methods=['GET'])
@@ -511,10 +514,21 @@ def get_queue_status(user_id, queue_id):
             return jsonify({'error': 'Queue item not found'}), 404
 
         queue_item = response.data
+        
+        # Calculate position dynamically if pending
+        position = None
+        if queue_item['status'] == 'pending':
+            pending_items = supabase.table('processing_queue')\
+                .select('id')\
+                .eq('status', 'pending')\
+                .order('created_at')\
+                .execute()
+            position = next((i + 1 for i, item in enumerate(pending_items.data) if item['id'] == queue_id), None)
+        
         return jsonify({
             'id': queue_item['id'],
             'status': queue_item['status'],
-            'position': queue_item['position'],
+            'position': position,
             'result': queue_item.get('result'),
             'error': queue_item.get('error_message'),
             'createdAt': queue_item['created_at'],
@@ -537,13 +551,23 @@ def get_user_queue(user_id):
             .order('created_at')\
             .execute()
 
+        # Get all pending items to calculate positions
+        pending_items = supabase.table('processing_queue')\
+            .select('id')\
+            .eq('status', 'pending')\
+            .order('created_at')\
+            .execute()
+        
+        # Create position lookup
+        position_map = {item['id']: i + 1 for i, item in enumerate(pending_items.data)}
+
         items = []
         for item in response.data:
             items.append({
                 'id': item['id'],
                 'fileName': item['file_name'],
                 'status': item['status'],
-                'position': item['position'],
+                'position': position_map.get(item['id']) if item['status'] == 'pending' else None,
                 'createdAt': item['created_at']
             })
 
