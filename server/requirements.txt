@@ -6,3 +6,5 @@ PyJWT
 numpy
 essentia
 gunicorn
+celery
+redis

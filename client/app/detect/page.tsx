@@ -194,6 +194,126 @@ export default function HomePage() {
         ));
     };
 
+    // Add this function to poll task status
+    const pollTaskStatus = async (taskId: string, queueItemId: string) => {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session) return;
+
+        const pollInterval = setInterval(async () => {
+            try {
+                const response = await fetch(`${endpointUrl}/api/task/${taskId}`, {
+                    headers: {
+                        'Authorization': `Bearer ${session.access_token}`
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error('Failed to get task status');
+                }
+
+                const data = await response.json();
+
+                if (data.state === 'PROGRESS') {
+                    updateQueueItem(queueItemId, {
+                        progress: data.progress
+                    });
+                } else if (data.state === 'SUCCESS') {
+                    updateQueueItem(queueItemId, {
+                        status: 'completed',
+                        progress: 100,
+                        result: data.result
+                    });
+
+                    setResults(prev => [data.result, ...prev]);
+                    clearInterval(pollInterval);
+
+                    // Remove completed item after 3 seconds
+                    setTimeout(() => {
+                        setQueue(prev => prev.filter(item => item.id !== queueItemId));
+                    }, 3000);
+                } else if (data.state === 'FAILURE') {
+                    updateQueueItem(queueItemId, {
+                        status: 'failed',
+                        progress: 0,
+                        error: data.error || 'Processing failed'
+                    });
+                    clearInterval(pollInterval);
+                }
+            } catch (error) {
+                console.error('Polling error:', error);
+                clearInterval(pollInterval);
+                updateQueueItem(queueItemId, {
+                    status: 'failed',
+                    error: 'Failed to check status'
+                });
+            }
+        }, 2000); // Poll every 2 seconds
+
+        // Clean up after 5 minutes
+        setTimeout(() => clearInterval(pollInterval), 300000);
+    };
+
+    // Update the processQueue function
+    useEffect(() => {
+        const processQueue = async () => {
+            const nextItem = queue.find(item => item.status === 'waiting');
+            if (!nextItem || isProcessing) return;
+
+            setIsProcessing(true);
+            updateQueueItem(nextItem.id, { status: 'processing', progress: 5 });
+
+            try {
+                const formData = new FormData();
+                formData.append('file', nextItem.file);
+                formData.append('fps', fps.toString());
+                formData.append('sensitivity', sensitivity);
+                formData.append('loudness', loudness.toString());
+                formData.append('minGap', minGap.toString());
+                formData.append('beatsOnly', beatsOnly.toString());
+                formData.append('markerColor', markerColor);
+                formData.append('markerName', markerName);
+                formData.append('includeTimestamps', includeTimestamps.toString());
+
+                const { data: { session } } = await supabase.auth.getSession();
+                if (!session) {
+                    throw new Error('Not authenticated');
+                }
+
+                const res = await fetch(`${endpointUrl}/api/process`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${session.access_token}`
+                    },
+                    body: formData
+                });
+
+                if (!res.ok) {
+                    const errorText = await res.text();
+                    throw new Error(errorText || 'Processing failed');
+                }
+
+                const result = await res.json();
+
+                // Start polling for task status
+                if (result.taskId) {
+                    pollTaskStatus(result.taskId, nextItem.id);
+                }
+
+            } catch (err) {
+                console.error('Error processing audio:', err);
+                updateQueueItem(nextItem.id, {
+                    status: 'failed',
+                    progress: 0,
+                    error: err instanceof Error ? err.message : 'Processing failed'
+                });
+            } finally {
+                setIsProcessing(false);
+            }
+        };
+
+        processQueue();
+    }, [queue, isProcessing]);
+
     const handleDrop = (e: React.DragEvent) => {
         e.preventDefault();
         setIsDragging(false);

@@ -20,6 +20,7 @@ from essentia.standard import (
     BeatTrackerMultiFeature,
     Loudness
 )
+from celery import Celery
 import io
 
 load_dotenv()
@@ -40,10 +41,18 @@ CORS(
     }}
 )
 
-
 # Configuration
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
 app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
+
+# Redis/Celery Configuration
+REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+app.config['CELERY_BROKER_URL'] = REDIS_URL
+app.config['CELERY_RESULT_BACKEND'] = REDIS_URL
+
+# Initialize Celery
+celery = Celery(app.name, broker=app.config['CELERY_BROKER_URL'])
+celery.conf.update(app.config)
 
 # Supabase setup
 SUPABASE_URL = os.getenv('SUPABASE_URL')
@@ -215,7 +224,6 @@ def create_edl_markers(times, fps=30, color='red', name_prefix='Beat', include_t
     for i, t in enumerate(times, 1):
         tc = seconds_to_timecode(t, fps)
         
-        # Create marker name with optional timestamp
         if include_timestamps:
             timestamp_str = format_timestamp(t)
             marker_name = f"{name_prefix} {i} [{timestamp_str}]"
@@ -247,6 +255,121 @@ def calculate_statistics(times):
         'max_spacing': max(spacings)
     }
 
+# ------------------ Celery Tasks ------------------
+@celery.task(bind=True)
+def process_audio_task(self, audio_path, settings, user_id, file_name, processing_id):
+    """Background task to process audio"""
+    try:
+        # Update task state
+        self.update_state(state='PROGRESS', meta={'progress': 10})
+        
+        # Load audio file
+        loader = MonoLoader(filename=audio_path)
+        audio = loader()
+        sample_rate = loader.paramValue('sampleRate')
+        duration = len(audio) / sample_rate
+
+        self.update_state(state='PROGRESS', meta={'progress': 30})
+
+        # Detect beats
+        beats = detect_beats(audio)
+        
+        # Detect onsets if needed
+        if not settings['beatsOnly']:
+            onsets = detect_onsets(audio, sample_rate, settings['sensitivity'])
+            combined = snap_onsets_to_beats(beats, onsets)
+        else:
+            combined = beats
+
+        self.update_state(state='PROGRESS', meta={'progress': 60})
+
+        # Filter by loudness
+        filtered = filter_by_loudness(audio, combined, sample_rate, settings['loudness'])
+        
+        # Apply smart spacing
+        final_times = smart_spacing(filtered, settings['minGap'])
+        
+        # Calculate statistics
+        stats = calculate_statistics(final_times)
+
+        self.update_state(state='PROGRESS', meta={'progress': 80})
+
+        # Create output files
+        timestamp = datetime.utcnow().isoformat() + 'Z'
+        
+        # Create beats text file
+        beats_content = "\n".join([format_timestamp(t) for t in final_times])
+        beats_filename = f"{user_id}/{processing_id}_beats.txt"
+        
+        # Create EDL markers file
+        edl_content = create_edl_markers(
+            final_times, 
+            fps=settings['fps'], 
+            color=settings['markerColor'], 
+            name_prefix=settings['markerName'],
+            include_timestamps=settings['includeTimestamps']
+        )
+        edl_filename = f"{user_id}/{processing_id}_markers.edl"
+        
+        # Upload files to Supabase storage
+        supabase_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        
+        supabase_client.storage.from_('beatmarker-files').upload(
+            beats_filename,
+            beats_content.encode('utf-8'),
+            {'content-type': 'text/plain'}
+        )
+        
+        supabase_client.storage.from_('beatmarker-files').upload(
+            edl_filename,
+            edl_content.encode('utf-8'),
+            {'content-type': 'text/plain'}
+        )
+        
+        # Get public URLs
+        beats_url = supabase_client.storage.from_('beatmarker-files').get_public_url(beats_filename)
+        markers_url = supabase_client.storage.from_('beatmarker-files').get_public_url(edl_filename)
+
+        self.update_state(state='PROGRESS', meta={'progress': 95})
+
+        # Save to database
+        supabase_client.table('processing_history').insert({
+            'id': processing_id,
+            'user_id': user_id,
+            'file_name': file_name,
+            'settings': settings,
+            'beats_url': beats_url,
+            'markers_url': markers_url,
+            'beats_count': stats['count'],
+            'duration_seconds': duration,
+            'avg_spacing': stats['avg_spacing'],
+            'created_at': timestamp
+        }).execute()
+
+        # Clean up temp file
+        if os.path.exists(audio_path):
+            os.remove(audio_path)
+
+        return {
+            'id': processing_id,
+            'fileName': file_name,
+            'settings': settings,
+            'timestamp': timestamp,
+            'beatsUrl': beats_url,
+            'markersUrl': markers_url,
+            'beatsCount': stats['count'],
+            'duration': duration,
+            'avgSpacing': stats['avg_spacing'],
+            'minSpacing': stats['min_spacing'],
+            'maxSpacing': stats['max_spacing']
+        }
+
+    except Exception as e:
+        # Clean up on error
+        if 'audio_path' in locals() and os.path.exists(audio_path):
+            os.remove(audio_path)
+        raise Exception(f'Processing failed: {str(e)}')
+
 # ------------------ Flask Routes ------------------
 @app.route('/api/health', methods=['GET'])
 def health_check():
@@ -256,7 +379,7 @@ def health_check():
 @app.route('/api/process', methods=['POST'])
 @require_auth
 def process_audio(user_id):
-    """Process audio file and detect beats/onsets"""
+    """Queue audio file for processing"""
     if 'file' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
 
@@ -272,133 +395,67 @@ def process_audio(user_id):
 
     try:
         # Extract settings from the form
-        fps = int(request.form.get('fps', 30))
-        sensitivity = request.form.get('sensitivity', 'low')
-        loudness_percentile = int(request.form.get('loudness', 70))
-        min_gap = float(request.form.get('minGap', 0.5))
-        beats_only = request.form.get('beatsOnly', 'false').lower() == 'true'
-        
-        # Output options
-        marker_color = request.form.get('markerColor', 'red')
-        marker_name = request.form.get('markerName', 'Beat')
-        include_timestamps = request.form.get('includeTimestamps', 'true').lower() == 'true'
-
-        # Load audio file
-        loader = MonoLoader(filename=temp_path)
-        audio = loader()
-        sample_rate = loader.paramValue('sampleRate')
-        duration = len(audio) / sample_rate
-
-        # Detect beats
-        beats = detect_beats(audio)
-        
-        # Detect onsets if needed
-        if not beats_only:
-            onsets = detect_onsets(audio, sample_rate, sensitivity)
-            combined = snap_onsets_to_beats(beats, onsets)
-        else:
-            combined = beats
-
-        # Filter by loudness
-        filtered = filter_by_loudness(audio, combined, sample_rate, loudness_percentile)
-        
-        # Apply smart spacing
-        final_times = smart_spacing(filtered, min_gap)
-        
-        # Calculate statistics
-        stats = calculate_statistics(final_times)
-
-        # Create output files
-        processing_id = str(uuid.uuid4())
-        timestamp = datetime.utcnow().isoformat() + 'Z'
-        
-        # Create beats text file
-        beats_content = "\n".join([format_timestamp(t) for t in final_times])
-        beats_filename = f"{user_id}/{processing_id}_beats.txt"
-        
-        # Create EDL markers file with custom options
-        edl_content = create_edl_markers(
-            final_times, 
-            fps=fps, 
-            color=marker_color, 
-            name_prefix=marker_name,
-            include_timestamps=include_timestamps
-        )
-        edl_filename = f"{user_id}/{processing_id}_markers.edl"
-        
-        # Upload files to Supabase storage
-        try:
-            supabase.storage.from_('beatmarker-files').upload(
-                beats_filename,
-                beats_content.encode('utf-8'),
-                {'content-type': 'text/plain'}
-            )
-            
-            supabase.storage.from_('beatmarker-files').upload(
-                edl_filename,
-                edl_content.encode('utf-8'),
-                {'content-type': 'text/plain'}
-            )
-            
-            # Get public URLs
-            beats_url = supabase.storage.from_('beatmarker-files').get_public_url(beats_filename)
-            markers_url = supabase.storage.from_('beatmarker-files').get_public_url(edl_filename)
-            
-        except Exception as e:
-            return jsonify({'error': f'Failed to upload files: {str(e)}'}), 500
-
-        # Save to database
         settings = {
-            'fps': fps,
-            'sensitivity': sensitivity,
-            'loudness': loudness_percentile,
-            'minGap': min_gap,
-            'beatsOnly': beats_only,
-            'markerColor': marker_color,
-            'markerName': marker_name,
-            'includeTimestamps': include_timestamps
-        }
-        
-        try:
-            supabase.table('processing_history').insert({
-                'id': processing_id,
-                'user_id': user_id,
-                'file_name': file.filename,
-                'settings': settings,
-                'beats_url': beats_url,
-                'markers_url': markers_url,
-                'beats_count': stats['count'],
-                'duration_seconds': duration,
-                'avg_spacing': stats['avg_spacing'],
-                'created_at': timestamp
-            }).execute()
-        except Exception as e:
-            return jsonify({'error': f'Failed to save to database: {str(e)}'}), 500
-
-        # Prepare response
-        result = {
-            'id': processing_id,
-            'fileName': file.filename,
-            'settings': settings,
-            'timestamp': timestamp,
-            'beatsUrl': beats_url,
-            'markersUrl': markers_url,
-            'beatsCount': stats['count'],
-            'duration': duration,
-            'avgSpacing': stats['avg_spacing'],
-            'minSpacing': stats['min_spacing'],
-            'maxSpacing': stats['max_spacing']
+            'fps': int(request.form.get('fps', 30)),
+            'sensitivity': request.form.get('sensitivity', 'low'),
+            'loudness': int(request.form.get('loudness', 70)),
+            'minGap': float(request.form.get('minGap', 0.5)),
+            'beatsOnly': request.form.get('beatsOnly', 'false').lower() == 'true',
+            'markerColor': request.form.get('markerColor', 'red'),
+            'markerName': request.form.get('markerName', 'Beat'),
+            'includeTimestamps': request.form.get('includeTimestamps', 'true').lower() == 'true'
         }
 
-        return jsonify(result), 200
+        processing_id = str(uuid.uuid4())
+
+        # Queue the task
+        task = process_audio_task.apply_async(
+            args=[temp_path, settings, user_id, file.filename, processing_id]
+        )
+
+        return jsonify({
+            'taskId': task.id,
+            'processingId': processing_id,
+            'status': 'queued'
+        }), 202
 
     except Exception as e:
-        return jsonify({'error': f'Processing failed: {str(e)}'}), 500
-    
-    finally:
-        # Clean up temp file
         if os.path.exists(temp_path):
             os.remove(temp_path)
+        return jsonify({'error': f'Failed to queue task: {str(e)}'}), 500
+
+@app.route('/api/task/<task_id>', methods=['GET'])
+@require_auth
+def get_task_status(user_id, task_id):
+    """Get the status of a processing task"""
+    task = process_audio_task.AsyncResult(task_id)
+    
+    if task.state == 'PENDING':
+        response = {
+            'state': task.state,
+            'status': 'Pending...'
+        }
+    elif task.state == 'PROGRESS':
+        response = {
+            'state': task.state,
+            'progress': task.info.get('progress', 0),
+            'status': 'Processing...'
+        }
+    elif task.state == 'SUCCESS':
+        response = {
+            'state': task.state,
+            'result': task.info,
+            'status': 'Complete'
+        }
+    else:
+        # Task failed
+        response = {
+            'state': task.state,
+            'status': str(task.info),
+            'error': str(task.info)
+        }
+    
+    return jsonify(response)
 
 @app.route('/api/history', methods=['GET'])
 @require_auth
@@ -434,19 +491,15 @@ def get_history(user_id):
 def download_file(user_id, filename):
     """Download a processed file"""
     try:
-        # Verify the file belongs to the user
         if not filename.startswith(f"{user_id}/"):
             return jsonify({'error': 'Access denied'}), 403
         
-        # Get file from Supabase storage
         response = supabase.storage.from_('beatmarker-files').download(filename)
         
-        # Create a temporary file
         temp_path = os.path.join(app.config['UPLOAD_FOLDER'], filename.split('/')[-1])
         with open(temp_path, 'wb') as f:
             f.write(response)
         
-        # Send file and schedule cleanup
         return send_file(
             temp_path,
             as_attachment=True,
@@ -455,7 +508,6 @@ def download_file(user_id, filename):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     finally:
-        # Clean up temp file after sending
         if 'temp_path' in locals() and os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
@@ -467,7 +519,6 @@ def download_file(user_id, filename):
 def delete_processing(user_id, processing_id):
     """Delete a processing record and associated files"""
     try:
-        # Get the record to verify ownership and get file paths
         response = supabase.table('processing_history')\
             .select('*')\
             .eq('id', processing_id)\
@@ -477,16 +528,14 @@ def delete_processing(user_id, processing_id):
         if not response.data:
             return jsonify({'error': 'Record not found or access denied'}), 404
         
-        # Delete files from storage
         beats_filename = f"{user_id}/{processing_id}_beats.txt"
         edl_filename = f"{user_id}/{processing_id}_markers.edl"
         
         try:
             supabase.storage.from_('beatmarker-files').remove([beats_filename, edl_filename])
         except:
-            pass  # Continue even if file deletion fails
+            pass
         
-        # Delete from database
         supabase.table('processing_history')\
             .delete()\
             .eq('id', processing_id)\
